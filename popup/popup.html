@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>RE Scraper Pro</title>
+<link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="header">
+      <div class="brand">
+        <span class="brand-dot"></span>
+        <span>RE Scraper Pro</span>
+      </div>
+      <span id="statusPill" class="pill pill-idle">Idle</span>
+    </header>
+
+    <section id="unsupportedNotice" class="notice hidden">
+      Open a supported search-results page (Bayut, PropertyFinder, or Zillow) to start scraping.
+    </section>
+
+    <section id="blockedNotice" class="notice notice-warn hidden">
+      ⚠ Bot-check / CAPTCHA detected on the site. Solve it manually in the browser tab, then click Resume.
+    </section>
+
+    <section class="controls">
+      <button id="btnStart" class="btn btn-primary">▶ Start Scraping</button>
+      <button id="btnAutoSplit" class="btn btn-primary">⚡ Auto-Split & Scrape</button>
+      <button id="btnPause" class="btn hidden">⏸ Pause</button>
+      <button id="btnResume" class="btn hidden">▶ Resume</button>
+      <button id="btnStop" class="btn btn-danger hidden">⏹ Stop</button>
+    </section>
+    <p class="hint controls-hint">
+      <strong>Auto-Split &amp; Scrape</strong> works out price-band slices on its own so a
+      capped search (e.g. PropertyFinder stopping past ~page 50) doesn't cut your results
+      short — one click, no manual filter URLs needed.
+    </p>
+    <p id="resumeHint" class="hint controls-hint hidden">
+      Picking up from page <span id="resumeHintPage">—</span> — Stop + Start continues where you
+      left off. Use Export → Clear Data first for a genuinely fresh scrape.
+    </p>
+
+    <section class="controls-batch">
+      <button id="btnToggleBatch" class="btn btn-link">Batch mode (split a big search into slices) ▾</button>
+      <div id="batchPanel" class="hidden">
+        <p class="hint">
+          Some sites (PropertyFinder included) stop returning results past a fixed page
+          depth even when more listings match your filters. Paste one search URL per line —
+          each narrowed with its own filters (price band, bedrooms, subcommunity, etc.) so
+          every slice stays under that page cap — and Start Batch will run them one after
+          another into the same dataset. Duplicate listings across slices are skipped
+          automatically.
+        </p>
+        <textarea id="batchUrls" rows="5" placeholder="https://www.propertyfinder.ae/en/search?...&price_min=0&price_max=1000000
+https://www.propertyfinder.ae/en/search?...&price_min=1000000&price_max=2000000
+https://www.propertyfinder.ae/en/search?...&price_min=2000000"></textarea>
+        <button id="btnStartBatch" class="btn btn-primary">▶ Start Batch</button>
+        <p id="batchProgress" class="hint hidden"></p>
+      </div>
+    </section>
+
+    <section class="progress-section">
+      <div class="progress-bar-track">
+        <div id="progressBarFill" class="progress-bar-fill" style="width:0%"></div>
+      </div>
+      <div class="progress-meta">
+        <span id="progressPct">0%</span>
+        <span id="elapsedText">Elapsed: —</span>
+        <span id="etaText">ETA: —</span>
+      </div>
+    </section>
+
+    <section class="stats-grid">
+      <div class="stat"><span class="stat-label">📄 Page</span><span id="statPage" class="stat-value">—</span></div>
+      <div class="stat"><span class="stat-label">📦 Scraped</span><span id="statScraped" class="stat-value">0</span></div>
+      <div class="stat"><span class="stat-label">⏳ Remaining</span><span id="statRemaining" class="stat-value">0</span></div>
+      <div class="stat"><span class="stat-label">✔ Success</span><span id="statSuccess" class="stat-value">0</span></div>
+      <div class="stat"><span class="stat-label">⚠ Errors</span><span id="statErrors" class="stat-value">0</span></div>
+      <div class="stat"><span class="stat-label">↻ Retry</span><span id="statRetries" class="stat-value">0</span></div>
+    </section>
+
+    <section class="tabs">
+      <button class="tab-btn active" data-tab="logs">📜 Live Logs</button>
+      <button class="tab-btn" data-tab="settings">⚙ Settings</button>
+      <button class="tab-btn" data-tab="export">📦 Export</button>
+    </section>
+
+    <section id="tab-logs" class="tab-panel active">
+      <div id="logList" class="log-list"></div>
+    </section>
+
+    <section id="tab-settings" class="tab-panel">
+      <div class="form-row">
+        <label>Max pages (hard cap)</label>
+        <input type="number" id="setMaxPages" min="1" max="500" />
+      </div>
+      <div class="form-row">
+        <label>End page (blank = last page)</label>
+        <input type="number" id="setEndPage" min="1" />
+      </div>
+      <div class="form-row">
+        <label>Tab Concurrency (1–10)</label>
+        <input type="number" id="setConcurrency" min="1" max="30" />
+      </div>
+      <div class="form-row">
+        <label>Fetch Concurrency (1–30)</label>
+        <input type="number" id="setFetchConcurrency" min="1" max="100" />
+      </div>
+      <div class="form-row">
+        <label>Delay between listings (ms)</label>
+        <input type="number" id="setDelay" min="500" step="100" />
+      </div>
+      <div class="form-row">
+        <label>Retry attempts</label>
+        <input type="number" id="setRetries" min="0" max="10" />
+      </div>
+      <div class="form-row checkbox-row">
+        <label><input type="checkbox" id="setRawHtml" /> Store raw HTML per listing (large!)</label>
+      </div>
+      <div class="form-row checkbox-row">
+        <label><input type="checkbox" id="setAppend" /> Append to existing data (off = overwrite)</label>
+      </div>
+      <button id="btnSaveSettings" class="btn btn-secondary">Save Settings</button>
+      <p class="hint">Concurrency and delay are clamped to safe limits to reduce the chance of the site blocking your IP — see README.</p>
+
+      <h4 class="settings-subhead">Auto-Split &amp; Scrape (price segmentation)</h4>
+      <div class="form-row">
+        <label>Max listings per price band</label>
+        <input type="number" id="setAutoSplitThreshold" min="1" step="10" />
+      </div>
+      <div class="form-row">
+        <label>Price floor (AED, used if real min can't be detected)</label>
+        <input type="number" id="setAutoSplitFloor" min="0" step="1000" />
+      </div>
+      <div class="form-row">
+        <label>Price ceiling (AED, used if real max can't be detected)</label>
+        <input type="number" id="setAutoSplitCeiling" min="0" step="1000" />
+      </div>
+      <div class="form-row">
+        <label>Safety probe limit (max page loads for segmenting)</label>
+        <input type="number" id="setAutoSplitProbeLimit" min="1" step="10" />
+      </div>
+      <button id="btnSaveAutoSplitSettings" class="btn btn-secondary">Save Auto-Split Settings</button>
+      <p class="hint">
+        A search with more listings than the threshold above is automatically cut into
+        price bands — each sized dynamically from live probes of the actual data, not a
+        fixed AED step — so every listing still gets extracted and merged into one deduped
+        dataset.
+      </p>
+    </section>
+
+    <section id="tab-export" class="tab-panel">
+      <div class="form-row">
+        <label>Filename</label>
+        <input type="text" id="exportFilename" value="real_estate_scrape" />
+      </div>
+      <button id="btnExportXlsx" class="btn btn-primary">Export Excel (.xlsx)</button>
+      <button id="btnExportCsv" class="btn btn-secondary">Export CSV</button>
+      <button id="btnExportJson" class="btn btn-secondary">Export JSON</button>
+      <button id="btnClearData" class="btn btn-danger">Clear All Data</button>
+      <p class="hint"><span id="listingCountText">0</span> listings currently stored.</p>
+    </section>
+  </div>
+
+  <script src="../libs/xlsx.full.min.js"></script>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,47 @@
+{
+  "manifest_version": 3,
+  "name": "RE Scraper Pro — Multi-Page Real Estate Extractor",
+  "version": "1.0.0",
+  "description": "Scrapes real estate listings across multiple pages and exports to Excel/CSV. Supports Bayut (tested); PropertyFinder/Zillow scaffolds included but unverified against live DOM.",
+  "permissions": [
+    "storage",
+    "unlimitedStorage",
+    "tabs",
+    "scripting",
+    "downloads",
+    "alarms"
+  ],
+  "host_permissions": [
+    "https://www.propertyfinder.ae/*"
+  ],
+  "background": {
+    "service_worker": "background/service-worker.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.propertyfinder.ae/*"
+      ],
+      "js": ["content/content-script.bundle.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "options_ui": {
+    "page": "options/options.html",
+    "open_in_tab": true
+  },
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "assets/icons/icon16.png",
+      "48": "assets/icons/icon48.png",
+      "128": "assets/icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "assets/icons/icon16.png",
+    "48": "assets/icons/icon48.png",
+    "128": "assets/icons/icon128.png"
+  }
+}

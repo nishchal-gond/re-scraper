@@ -1,0 +1,198 @@
+name: PropertyFinder cloud scrape
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_search_url:
+        description: PropertyFinder search URL
+        required: true
+        type: string
+      price_floor:
+        description: Inclusive AED floor (blank uses parser/configured detection)
+        required: false
+        type: string
+      price_ceiling:
+        description: Inclusive AED ceiling (blank uses parser/configured detection)
+        required: false
+        type: string
+      worker_count:
+        description: Static worker count
+        required: true
+        default: "1"
+        type: choice
+        options: ["1", "2"]
+      test_mode:
+        description: Required narrow (~50 listing) checkpoint/resume gate
+        required: true
+        default: true
+        type: boolean
+  schedule:
+    # Resume checks are intentionally disabled until the narrow test is marked
+    # passed through repository variable RE_SCRAPER_TEST_PASSED=true.
+    - cron: "*/15 * * * *"
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: re-scraper-propertyfinder
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: ${{ github.event_name == 'workflow_dispatch' || vars.RE_SCRAPER_TEST_PASSED == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    outputs:
+      run_key: ${{ steps.identity.outputs.run_key }}
+      matrix: ${{ steps.assignment.outputs.matrix }}
+    env:
+      BASE_SEARCH_URL: ${{ inputs.base_search_url || vars.RE_SCRAPER_BASE_SEARCH_URL }}
+      PRICE_FLOOR: ${{ inputs.price_floor || vars.RE_SCRAPER_PRICE_FLOOR }}
+      PRICE_CEILING: ${{ inputs.price_ceiling || vars.RE_SCRAPER_PRICE_CEILING }}
+      WORKER_COUNT: ${{ inputs.worker_count || vars.RE_SCRAPER_WORKER_COUNT || '1' }}
+      TEST_MODE: ${{ inputs.test_mode || 'false' }}
+      NODE_OPTIONS: --experimental-default-type=module
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install ephemeral runner dependencies
+        run: |
+          npm install --no-save --no-package-lock --ignore-scripts playwright @actions/artifact xlsx
+          npx playwright install --with-deps chromium
+      - id: identity
+        name: Derive stable run identity
+        run: |
+          if [[ -z "$BASE_SEARCH_URL" ]]; then echo "BASE_SEARCH_URL is required" >&2; exit 1; fi
+          if [[ "$TEST_MODE" == "true" && "$WORKER_COUNT" != "1" ]]; then echo "The required test gate is single-worker only" >&2; exit 1; fi
+          RUN_KEY="pf-$(node -e "const c=require('crypto'); console.log(c.createHash('sha256').update([process.env.BASE_SEARCH_URL,process.env.PRICE_FLOOR,process.env.PRICE_CEILING,process.env.WORKER_COUNT].join('|')).digest('hex').slice(0,16))")"
+          echo "run_key=$RUN_KEY" >> "$GITHUB_OUTPUT"
+          echo "RUN_KEY=$RUN_KEY" >> "$GITHUB_ENV"
+      - id: restore
+        name: Restore immutable slice manifest when resuming
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          NAME="re-scraper-manifest--$RUN_KEY"
+          JSON="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?per_page=100&name=$NAME")"
+          ID="$(node -e "const x=JSON.parse(process.argv[1]); const a=(x.artifacts||[]).filter(v=>!v.expired).sort((a,b)=>Date.parse(b.created_at)-Date.parse(a.created_at))[0]; process.stdout.write(a ? String(a.id) : '')" "$JSON")"
+          if [[ -n "$ID" ]]; then
+            mkdir -p "$RUNNER_TEMP/re-scraper/$RUN_KEY/manifest"
+            gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ID/zip" > "$RUNNER_TEMP/manifest.zip"
+            unzip -oq "$RUNNER_TEMP/manifest.zip" -d "$RUNNER_TEMP/re-scraper/$RUN_KEY/manifest"
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Generate static slices and assignments
+        if: steps.restore.outputs.found != 'true'
+        env:
+          LISTING_THRESHOLD: ${{ inputs.test_mode && '50' || '900' }}
+        run: node cloud-runner/worker.js --prepare
+      - name: Publish immutable manifest
+        if: steps.restore.outputs.found != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: re-scraper-manifest--${{ steps.identity.outputs.run_key }}
+          path: ${{ runner.temp }}/re-scraper/${{ steps.identity.outputs.run_key }}/manifest
+          retention-days: 14
+          if-no-files-found: error
+      - id: assignment
+        name: Emit static matrix
+        run: |
+          MATRIX="$(node -e "const f=require('fs');const a=JSON.parse(f.readFileSync(process.env.RUNNER_TEMP+'/re-scraper/'+process.env.RUN_KEY+'/manifest/slices.json'));console.log(JSON.stringify([...Array(a.worker_count).keys()]))")"
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+
+  scrape:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ inputs.worker_count || vars.RE_SCRAPER_WORKER_COUNT || 1 }}
+      matrix:
+        worker_id: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    env:
+      RUN_KEY: ${{ needs.prepare.outputs.run_key }}
+      BASE_SEARCH_URL: ${{ inputs.base_search_url || vars.RE_SCRAPER_BASE_SEARCH_URL }}
+      WORKER_COUNT: ${{ inputs.worker_count || vars.RE_SCRAPER_WORKER_COUNT || '1' }}
+      NODE_OPTIONS: --experimental-default-type=module
+      LISTING_CONCURRENCY: "1"
+      REQUEST_DELAY_MS: "1500"
+      RETRY_ATTEMPTS: "3"
+      MAX_PAGES: "500"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install ephemeral runner dependencies
+        run: |
+          npm install --no-save --no-package-lock --ignore-scripts playwright @actions/artifact xlsx
+          npx playwright install --with-deps chromium
+      - name: Download static assignment and latest manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          NAME="re-scraper-manifest--$RUN_KEY"
+          JSON="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?per_page=100&name=$NAME")"
+          ID="$(node -e "const x=JSON.parse(process.argv[1]); const a=(x.artifacts||[]).filter(v=>!v.expired).sort((a,b)=>Date.parse(b.created_at)-Date.parse(a.created_at))[0]; if(!a) process.exit(2); process.stdout.write(String(a.id))" "$JSON")"
+          mkdir -p "$RUNNER_TEMP/re-scraper/$RUN_KEY/manifest"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ID/zip" > "$RUNNER_TEMP/manifest.zip"
+          unzip -oq "$RUNNER_TEMP/manifest.zip" -d "$RUNNER_TEMP/re-scraper/$RUN_KEY/manifest"
+          echo "ASSIGNMENT_FILE=$RUNNER_TEMP/re-scraper/$RUN_KEY/manifest/assignments/worker-${{ matrix.worker_id }}.json" >> "$GITHUB_ENV"
+      - name: Restore latest worker checkpoint and scrape assigned static slices
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node cloud-runner/worker.js --worker
+
+  merge:
+    needs: [prepare, scrape]
+    # scrape can succeed only after every assigned worker has published its
+    # final status: complete checkpoint; blocked/publish failures fail the job.
+    if: ${{ success() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      RUN_KEY: ${{ needs.prepare.outputs.run_key }}
+      NODE_OPTIONS: --experimental-default-type=module
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install ephemeral merge dependencies
+        run: npm install --no-save --no-package-lock --ignore-scripts @actions/artifact xlsx
+      - name: Download all immutable worker page-segment artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PREFIX="re-scraper-checkpoint--$RUN_KEY--"
+          export PREFIX
+          IDS="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/artifacts?per_page=100" --jq '.artifacts[] | select(.expired | not) | select(.name | startswith(env.PREFIX)) | .id')"
+          mkdir -p "$RUNNER_TEMP/segments"
+          while read -r ID; do
+            [[ -z "$ID" ]] && continue
+            mkdir -p "$RUNNER_TEMP/segments/$ID"
+            gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ID/zip" > "$RUNNER_TEMP/segments/$ID/artifact.zip"
+            unzip -oq "$RUNNER_TEMP/segments/$ID/artifact.zip" -d "$RUNNER_TEMP/segments/$ID"
+          done <<< "$IDS"
+      - name: Verify every worker final checkpoint is complete
+        run: |
+          node -e "const fs=require('fs'),p=require('path');const root=process.env.RUNNER_TEMP+'/segments';const files=[];const walk=d=>{for(const e of fs.readdirSync(d,{withFileTypes:true})){const q=p.join(d,e.name);e.isDirectory()?walk(q):e.name==='checkpoint.json'&&files.push(q)}};walk(root);const best=new Map;for(const f of files){const c=JSON.parse(fs.readFileSync(f));const old=best.get(c.worker_id);if(!old||c.sequence>old.sequence)best.set(c.worker_id,c)};const expected=JSON.parse(process.env.MATRIX);if(expected.some(id=>!best.has(id)||best.get(id).status!=='complete'))throw new Error('Not every worker has a final complete checkpoint');"
+        env:
+          MATRIX: ${{ needs.prepare.outputs.matrix }}
+      - name: Merge first-seen records and emit exact-schema exports
+        env:
+          SEGMENTS_DIR: ${{ runner.temp }}/segments
+          OUTPUT_DIR: ${{ runner.temp }}/final-output
+        run: node cloud-runner/merge.js
+      - uses: actions/upload-artifact@v4
+        with:
+          name: re-scraper-final--${{ needs.prepare.outputs.run_key }}
+          path: ${{ runner.temp }}/final-output
+          retention-days: 30
+          if-no-files-found: error
