@@ -254,7 +254,25 @@ export function extractPageData(input) {
     }
     return null;
   };
-  const collectLinks = () => {
+  const countDiagnostics = () => {
+    const selectors = [
+      '[data-testid*="result" i]', '[data-testid*="count" i]',
+      '[class*="result" i]', '[class*="count" i]', 'h1'
+    ];
+    const matches = selectors.flatMap((selector) => [...document.querySelectorAll(selector)].slice(0, 3).map((element) => ({
+      selector,
+      text: whitespace(element.textContent),
+      html: (element.outerHTML || "").slice(0, 1000),
+    }))).filter((entry) => entry.text || entry.html);
+    return {
+      title: document.title,
+      h1_text: whitespace(document.querySelector("h1")?.textContent),
+      property_card_count: document.querySelectorAll('a[data-testid*="property-card" i], a[class*="card-link" i], a[href*="/plp/"], a[href*=".html"]').length,
+      next_data_present: Boolean(document.getElementById("__NEXT_DATA__")),
+      counter_matches: matches,
+      body_preview: (document.body?.innerText || "").slice(0, 1000),
+    };
+  };  const collectLinks = () => {
     const links = [];
     const seen = new Set();
     if (/no\s*(?:properties|results|matching|listings)\b/i.test(document.body?.innerText || "")) return links;
@@ -282,7 +300,7 @@ export function extractPageData(input) {
   };
 
   if (input.mode === "blocker") return { blocked: blocked() };
-  if (input.mode === "count") return { blocked: blocked(), count: blocked() ? null : resultCount() };
+  if (input.mode === "count") { const isBlocked = blocked(); return { blocked: isBlocked, count: isBlocked ? null : resultCount(), diagnostics: input.debug ? countDiagnostics() : undefined }; }
   if (input.mode === "bounds") {
     const prices = collectSearchListings().map((item) => item.price).filter((value) => Number.isFinite(value) && value > 0);
     return { blocked: blocked(), bounds: prices.length ? { min: Math.min(...prices), max: Math.max(...prices) } : null };

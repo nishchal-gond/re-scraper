@@ -51,13 +51,17 @@ async function prepareManifest() {
 
   const go = async (url) => {
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 45_000 });
-    await page.waitForTimeout(750);
+    await waitForSearchResults(page);
     const check = await page.evaluate(extractPageData, { mode: "blocker" });
     if (check.blocked) throw new Error("PropertyFinder bot/CAPTCHA page detected while preparing slices. Stopping cleanly.");
   };
-  const probeCount = async (url) => {
+  const probeCount = async (url, probeContext) => {
     await go(url);
-    return (await page.evaluate(extractPageData, { mode: "count" })).count;
+    const outcome = await page.evaluate(extractPageData, { mode: "count", debug: process.env.TEST_MODE === "true" });
+    if (process.env.TEST_MODE === "true") {
+      console.log(JSON.stringify({ component: "price-probe", url, min_price: probeContext.minPrice, max_price: probeContext.maxPrice, probe_number: probeContext.probeNumber, count: outcome.count, blocked: outcome.blocked, diagnostics: outcome.diagnostics }));
+    }
+    return outcome.count;
   };
   try {
     await go(baseUrl);
@@ -122,6 +126,19 @@ async function prepareManifest() {
   }
 }
 
+async function waitForSearchResults(page) {
+  // PropertyFinder renders the total asynchronously after DOMContentLoaded.
+  // Network idle is best-effort because analytics can keep connections open.
+  await page.waitForLoadState("networkidle", { timeout: 12_000 }).catch(() => {});
+  await page.waitForFunction(() => {
+    const body = document.body?.innerText || "";
+    if (/no\s*(?:properties|results|listed|matching|listings)\b|couldn['’]t\s*find|don['’]t\s*have\s*any/i.test(body)) return true;
+    const h1 = document.querySelector("h1")?.textContent || "";
+    if (/\b[\d,]+\s*(?:properties|results|listed)\b/i.test(h1)) return true;
+    return Boolean(document.querySelector('a[data-testid*="property-card" i], a[class*="card-link" i], a[href*="/plp/"], a[href*=".html"]'));
+  }, undefined, { timeout: 15_000 }).catch(() => {});
+  await page.waitForTimeout(400);
+}
 async function runWorker() {
   const assignmentPath = requiredEnv("ASSIGNMENT_FILE");
   const assignment = JSON.parse(await readFile(assignmentPath, "utf8"));
